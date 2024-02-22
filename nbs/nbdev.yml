@@ -1,0 +1,9 @@
+project:
+  output-dir: _docs
+
+website:
+  title: "imageclassify"
+  site-url: "https://Autobot37.github.io/imageclassify"
+  description: "large scale"
+  repo-branch: main
+  repo-url: "https://github.com/Autobot37/imageclassify"
