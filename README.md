@@ -85,6 +85,6 @@
 
 # How to run this 
 - since it has dataset requirements it can be run in kaggle
-- download kaggle_code.ipynb and import notebook there and run it.
+- download [https://github.com/Autobot37/imageclassify/blob/main/nbs/ml-for-sustainability-srip-2024.ipynb] and import notebook there and run it.
 
 # Author ; Shiva Singh Bagri
