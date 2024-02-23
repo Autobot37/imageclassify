@@ -1,0 +1,282 @@
+[
+  {
+    "objectID": "ml-for-sustainability-srip-2024.html",
+    "href": "ml-for-sustainability-srip-2024.html",
+    "title": "ML for Sustainability",
+    "section": "",
+    "text": "Regular Imports\nimport torch\nimport torch.nn as nn\nfrom tqdm import tqdm\nfrom sklearn.metrics import confusion_matrix, roc_auc_score\nfrom torchvision.transforms import transforms\nfrom PIL import Image\nimport os\nimport numpy as np\nfrom torch.utils.data import DataLoader, SubsetRandomSampler\nfrom sklearn.model_selection import KFold\nfrom sklearn.metrics import confusion_matrix, roc_auc_score\nimport matplotlib.pyplot as plt\nimport torchvision.models as models\nimport torch.nn.functional as F\nSpecifying GPU for acceleration\ndevice = torch.device('cuda' if torch.cuda.is_available() else 'cpu')",
+    "crumbs": [
+      "ML for Sustainability"
+    ]
+  },
+  {
+    "objectID": "ml-for-sustainability-srip-2024.html#data-utilities",
+    "href": "ml-for-sustainability-srip-2024.html#data-utilities",
+    "title": "ML for Sustainability",
+    "section": "Data Utilities",
+    "text": "Data Utilities\n\ndata augmentation and transforms to prevent overfitting with eg random flip.\nimage size we resizing is (224,224,3)\nnormalising to a mean and standard deviation i specifically choose this mean because this is mean and std from imagenet dataset and a good representative for image datasets. [(https://stackoverflow.com/questions/58151507/why-pytorch-officially-use-mean-0-485-0-456-0-406-and-std-0-229-0-224-0-2)]\n\n\nclass Data(torch.utils.data.Dataset):\n    def __init__(self,images,labels):\n        super().__init__()\n        self.images = images\n        self.labels = labels\n        self.preprocess = transforms.Compose([\n            transforms.RandomHorizontalFlip(),\n            transforms.Resize(256),\n            transforms.CenterCrop(224),\n            transforms.ToTensor(),\n            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),\n        ])\n        assert len(self.images)==len(self.labels),\"unmatched dataset\"\n    def __len__(self):\n        return len(self.images)\n    def __getitem__(self,idx):\n        img = Image.open(self.images[idx])\n        label = self.labels[idx]\n        return self.preprocess(img), torch.tensor(label,dtype=torch.long)",
+    "crumbs": [
+      "ML for Sustainability"
+    ]
+  },
+  {
+    "objectID": "ml-for-sustainability-srip-2024.html#here-is-mean-data-distribution-of-pixel-values-of-all-classes",
+    "href": "ml-for-sustainability-srip-2024.html#here-is-mean-data-distribution-of-pixel-values-of-all-classes",
+    "title": "ML for Sustainability",
+    "section": "Here is mean data distribution of pixel values of all classes",
+    "text": "Here is mean data distribution of pixel values of all classes\n\nimg_path = \"/kaggle/input/animal-image-dataset-90-different-animals/animals/animals\"\n\npixel_values = []\nimages = []\nfor folder in os.listdir(img_path):\n    anim_fold = os.path.join(img_path, folder)\n    for t, img_file in enumerate(os.listdir(anim_fold)):\n        if t&gt;=1:break\n        img_path_full = os.path.join(anim_fold, img_file)\n        images.append(img_path_full)\n  \nlabels = [-1]*len(images)\ntemp_data = Data(images=images,labels=labels)\nfor img,label in temp_data:\n    pixel_values.append(img.flatten())\n\n# Plot histogram of pixel values\nplt.figure(figsize=(10, 6))\nplt.hist(pixel_values, bins=30, alpha=0.7)\nplt.xlabel('Pixel Value')\nplt.ylabel('Frequency')\nplt.title('Histogram of Pixel Values')\nplt.show()",
+    "crumbs": [
+      "ML for Sustainability"
+    ]
+  },
+  {
+    "objectID": "ml-for-sustainability-srip-2024.html#train-function",
+    "href": "ml-for-sustainability-srip-2024.html#train-function",
+    "title": "ML for Sustainability",
+    "section": "Train function",
+    "text": "Train function\n\nfor every epoch it first trains on train_loader and do a validation on val_loader\nhere we are using tqdm for a progress bar\nDefault hyperparameters\nepochs per fold =: 3\nlearning rate =: 1e-4\nloss function =: CrossEntropyLoss\noptimizer =: AdamW with lr = 1e-4 and defaults betas (0.9,0.99) with 0.01 default weight decay\n\nsuperconvergence post[https://www.fast.ai/posts/2018-07-02-adam-weight-decay.html]\nthere are some optimizations like: * deleting model at end and saving best weights * deleting images and labels sent to gpu at end * Half precision for validation , since we dont have to update weights here, using half precision makes it fast for fast evaluating.\n\ndef train(train_loader, val_loader, model, epochs=3, lr=1e-4, model_name=\"model\",lossf = nn.CrossEntropyLoss(),best_acc=0.0):\n    model.to(device)\n    model.train()\n    if(os.path.exists(f\"{model_name}_model.pth\")):\n        model.load_state_dict(torch.load(f\"{model_name}_model.pth\"))  #saving best weights\n        print(f\"weights of {model_name} loaded\")\n    optim = torch.optim.AdamW(model.parameters(), lr=lr)\n    \n    losslist = []\n    accuracylist = []\n    y_true = []\n    y_pred = []\n    \n    for epoch in range(epochs):\n        # Training loop\n        total_loss = 0.0\n        total_correct = 0\n        total_samples = 0\n        #progress bar \n        train_progress = tqdm(enumerate(train_loader), total=len(train_loader), desc=f\"Epoch {epoch+1}/{epochs} (Training) for {model_name}\")\n        for batch_idx, (imgs, labels) in train_progress:\n            imgs, labels = imgs.to(device), labels.to(device)\n            out = model(imgs)\n            loss = lossf(out, labels)\n            optim.zero_grad(set_to_none=True)\n            loss.backward()\n            optim.step()\n            total_loss += loss.item() \n            _, predicted = torch.max(out.data, 1)\n            total_correct += (predicted == labels).sum().item()\n            total_samples += labels.size(0)\n            loss_now = total_loss / (batch_idx + 1)\n            accuracy_now = total_correct / total_samples\n            train_progress.set_postfix(loss=loss_now, acc=accuracy_now)\n            del imgs, labels\n            \n        # Validation loop\n        total_val_loss = 0.0\n        total_val_correct = 0\n        total_val_samples = 0\n        val_progress = tqdm(enumerate(val_loader), total=len(val_loader), desc=f\"Epoch {epoch+1}/{epochs} (Validation) for {model_name}\")\n        model.eval()\n        #model.eval() to turn dropout off and stop tracking gradients\n        with torch.no_grad():\n            for batch_idx, (imgs, labels) in val_progress:\n                imgs, labels = imgs.to(device), labels.to(device)\n                with torch.autocast(device_type=\"cuda\"):##Half preicision\n                    out = model(imgs)\n                    loss = lossf(out, labels)\n                total_val_loss += loss.item() \n                _, predicted = torch.max(out.data, 1)\n                total_val_correct += (predicted == labels).sum().item()\n                total_val_samples += labels.size(0)\n                val_loss_now = total_val_loss / (batch_idx + 1)\n                val_accuracy_now = total_val_correct / total_val_samples\n                val_progress.set_postfix(loss=val_loss_now, acc=val_accuracy_now)\n                y_true.extend(labels.cpu().numpy())\n                y_pred.extend(predicted.cpu().numpy())\n                del imgs, labels\n                \n        losslist.append(total_val_loss / len(val_loader))\n        val_acc = total_val_correct / total_val_samples\n        accuracylist.append(val_acc)\n        #saving best model\n        if val_acc &gt; best_acc:\n            best_acc = val_acc\n            save(model, f\"{model_name}_model.pth\")\n            print(f\"{model_name} weights saved with best accuracy :{best_acc}\")\n                \n        model.train()\n        \n    del model\n    print(\"Training completed weight saved.\")\n    return losslist, accuracylist, y_true, y_pred, best_acc\n\ndef save(model, path):\n    torch.save(model.state_dict(), path)\n    print(f\"Model saved to {path}\")",
+    "crumbs": [
+      "ML for Sustainability"
+    ]
+  },
+  {
+    "objectID": "ml-for-sustainability-srip-2024.html#main-one-vs-rest-binary-classification-function",
+    "href": "ml-for-sustainability-srip-2024.html#main-one-vs-rest-binary-classification-function",
+    "title": "ML for Sustainability",
+    "section": "Main One vs Rest binary classification function",
+    "text": "Main One vs Rest binary classification function\n\nHere we will select some class and then perform binary classification on it means, we assign 1 label to selected class and 0 label to other classes and then take loss by CrossEntropy and perform weights update.\nfor every data class we will make a train and Validation Dataloader for 3 folds and collect data like loss and accuracy to plot",
+    "crumbs": [
+      "ML for Sustainability"
+    ]
+  },
+  {
+    "objectID": "ml-for-sustainability-srip-2024.html#dataloader",
+    "href": "ml-for-sustainability-srip-2024.html#dataloader",
+    "title": "ML for Sustainability",
+    "section": "Dataloader",
+    "text": "Dataloader\n\ntaking images from a particular data index class and other data classes, and for binary classification we set data index class labels as 1 and other labels as 0\nhere take is a parameter which defines how much to take from other classes currently we take 10% of other classes and it works.\nsetting number of workers 2 and pin memory for faster data caching\nSubsetRandomSampler for selecting indices\n\nBatch Size * batch size is 32 * since GPU we are using P100 has enough memory and bottleneck is not gpu but cpu for data caching.\n\ndef one_vs_rest(model,model_name, data_index, n_fold=3,batch_size=32, num_workers=2,img_path = \"/kaggle/input/animal-image-dataset-90-different-animals/animals/animals\",best_acc=0.0):\n    # Data loading\n    images = []\n    labels = []\n    for folder in os.listdir(img_path):\n        anim_fold = os.path.join(img_path, folder)\n        if folder == os.listdir(img_path)[data_index]:\n            take = 1\n        else:\n            take = 0.25\n        tot_len = len(os.listdir(anim_fold))\n        for t,img_file in enumerate(os.listdir(anim_fold)):\n            if t&gt;=take*tot_len:\n                break\n            img_path_full = os.path.join(anim_fold, img_file)\n            images.append(img_path_full)\n            if folder == os.listdir(img_path)[data_index]:\n                labels.append(1)\n            else:\n                labels.append(0)\n    images = np.array(images)\n    labels = np.array(labels)\n    \n    # Define dataset and indices\n    dataset = Data(images=images, labels=labels)\n    kf = KFold(n_splits=n_fold, shuffle=True, random_state=42)##3 fold \n    \n    allloss = {\"fold1\":[],\"fold2\":[],\"fold3\":[]}\n    allacc = {\"fold1\":[],\"fold2\":[],\"fold3\":[]}\n    ally_true = {\"fold1\":[],\"fold2\":[],\"fold3\":[]}\n    ally_pred = {\"fold1\":[],\"fold2\":[],\"fold3\":[]}\n    \n\n    for fold, (train_indices, val_indices) in enumerate(kf.split(dataset)):\n        train_sampler = torch.utils.data.SubsetRandomSampler(train_indices)\n        train_loader = DataLoader(dataset, batch_size=batch_size, sampler=train_sampler, num_workers=num_workers, pin_memory=True)\n\n        val_sampler = torch.utils.data.SubsetRandomSampler(val_indices)\n        val_loader = DataLoader(dataset, batch_size=batch_size, sampler=val_sampler, num_workers=num_workers, pin_memory=True)\n\n        print(f\"Fold {fold+1}:\")  \n        \n        losslist, acclist, y_true, y_pred, best_acc = train(train_loader, val_loader, model,  model_name=model_name, best_acc=best_acc)\n        allloss[f\"fold{fold+1}\"].append(losslist)\n        allacc[f\"fold{fold+1}\"].append(acclist)\n        ally_true[f\"fold{fold+1}\"].append(y_true)\n        ally_pred[f\"fold{fold+1}\"].append(y_pred)\n        \n    return allloss,allacc,ally_true,ally_pred, best_acc",
+    "crumbs": [
+      "ML for Sustainability"
+    ]
+  },
+  {
+    "objectID": "ml-for-sustainability-srip-2024.html#custommodel",
+    "href": "ml-for-sustainability-srip-2024.html#custommodel",
+    "title": "ML for Sustainability",
+    "section": "CustomModel",
+    "text": "CustomModel\n\nWe used model with AttentionBlock to emphasize the importance of image patches.to focus on important part of images and discared irrelevant parts.although it is helpful in medical datasets but in animal datasets maybe there is a big landscape with animal in small pixels for eg with birds, there attention will be useful.",
+    "crumbs": [
+      "ML for Sustainability"
+    ]
+  },
+  {
+    "objectID": "ml-for-sustainability-srip-2024.html#components",
+    "href": "ml-for-sustainability-srip-2024.html#components",
+    "title": "ML for Sustainability",
+    "section": "Components",
+    "text": "Components",
+    "crumbs": [
+      "ML for Sustainability"
+    ]
+  },
+  {
+    "objectID": "ml-for-sustainability-srip-2024.html#attention-block",
+    "href": "ml-for-sustainability-srip-2024.html#attention-block",
+    "title": "ML for Sustainability",
+    "section": "Attention Block",
+    "text": "Attention Block\n\nThe intermediate features is the output of pool-3 or pool-4 and the global feature vector (output of pool-5) is fed as input to the attention layer.\nfeature upsampling is done via bilinear interpolation to mak intermediate and global feature vector same shape.\nAfter that an element wise sum is done followed by a convolution operation that just reduces the 256 channels to 1.\nThis is then fed into a Softmax layer, which gives us a normalized Attention map (A). Each scalar element in A represents the degree of attention to the corresponding spatial feature vector in F.\nThe new feature vector 𝐹̂ is then computed by pixel-wise multiplication. That is, each feature vector f is multiplied by the attention element a\nSo, the attention map A and the new feature vector 𝐹̂ are the outputs of the Attention Layer.\n\n[https://github.com/SaoYan/IPMI2019-AttnMel/blob/99e4a9b71717fb51f24d7994948b6a0e76bb8d58/networks.py]",
+    "crumbs": [
+      "ML for Sustainability"
+    ]
+  },
+  {
+    "objectID": "ml-for-sustainability-srip-2024.html#initialising",
+    "href": "ml-for-sustainability-srip-2024.html#initialising",
+    "title": "ML for Sustainability",
+    "section": "Initialising",
+    "text": "Initialising\n\nwe initialise with kaiming normal to prevent gradient vanishing or exploding latter on.\nConv2d Layers: initializes the weights using the Kaiming normal.\nBatchNorm2d Layers: it sets the weights to 1 and biases to 0.\nLinear Layers: initializes the weights from a normal distribution with mean 0 and standard deviation 0.01. It sets the biases to 0.\n\n\nclass AttentionBlock(nn.Module):\n    def __init__(self, in_features_l, in_features_g, attn_features, up_factor, normalize_attn=True):\n        super(AttentionBlock, self).__init__()\n        self.up_factor = up_factor\n        self.normalize_attn = normalize_attn\n        self.W_l = nn.Conv2d(in_channels=in_features_l, out_channels=attn_features, kernel_size=1, padding=0, bias=False)\n        self.W_g = nn.Conv2d(in_channels=in_features_g, out_channels=attn_features, kernel_size=1, padding=0, bias=False)\n        self.phi = nn.Conv2d(in_channels=attn_features, out_channels=1, kernel_size=1, padding=0, bias=True)\n    def forward(self, l, g):\n        N, C, W, H = l.size()\n        l_ = self.W_l(l)\n        g_ = self.W_g(g)\n        if self.up_factor &gt; 1:\n            g_ = F.interpolate(g_, scale_factor=self.up_factor, mode='bilinear', align_corners=False)\n        c = self.phi(F.relu(l_ + g_)) # batch_sizex1xWxH\n        \n        # compute attn map\n        if self.normalize_attn:\n            a = F.softmax(c.view(N,1,-1), dim=2).view(N,1,W,H)\n        else:\n            a = torch.sigmoid(c)\n        # re-weight the local feature\n        f = torch.mul(a.expand_as(l), l) # batch_sizexCxWxH\n        if self.normalize_attn:\n            output = f.view(N,C,-1).sum(dim=2) # weighted sum\n        else:\n            output = F.adaptive_avg_pool2d(f, (1,1)).view(N,C) # global average pooling\n        return a, output\n\nclass Model(nn.Module):\n    def __init__(self, num_classes, normalize_attn=False):\n        super().__init__()\n        self.conv_block1 = nn.Sequential(\n            nn.Conv2d(3, 64, kernel_size=3, padding=1),\n            nn.BatchNorm2d(64),\n            nn.ReLU(inplace=True),\n            nn.Conv2d(64, 64, kernel_size=3, padding=1),\n            nn.BatchNorm2d(64),\n            nn.ReLU(inplace=True),\n            nn.MaxPool2d(kernel_size=2, stride=2)\n        )\n        self.conv_block2 = nn.Sequential(\n            nn.Conv2d(64, 128, kernel_size=3, padding=1),\n            nn.BatchNorm2d(128),\n            nn.ReLU(inplace=True),\n            nn.Conv2d(128, 128, kernel_size=3, padding=1),\n            nn.BatchNorm2d(128),\n            nn.ReLU(inplace=True),\n            nn.MaxPool2d(kernel_size=2, stride=2)\n        )\n        self.conv_block3 = nn.Sequential(\n            nn.Conv2d(128, 256, kernel_size=3, padding=1),\n            nn.BatchNorm2d(256),\n            nn.ReLU(inplace=True),\n            nn.Conv2d(256, 256, kernel_size=3, padding=1),\n            nn.BatchNorm2d(256),\n            nn.ReLU(inplace=True),\n            nn.Conv2d(256, 256, kernel_size=3, padding=1),\n            nn.BatchNorm2d(256),\n            nn.ReLU(inplace=True),\n            nn.MaxPool2d(kernel_size=2, stride=2)\n        )\n        self.conv_block4 = nn.Sequential(\n            nn.Conv2d(256, 512, kernel_size=3, padding=1),\n            nn.BatchNorm2d(512),\n            nn.ReLU(inplace=True),\n            nn.Conv2d(512, 512, kernel_size=3, padding=1),\n            nn.BatchNorm2d(512),\n            nn.ReLU(inplace=True),\n            nn.Conv2d(512, 512, kernel_size=3, padding=1),\n            nn.BatchNorm2d(512),\n            nn.ReLU(inplace=True),\n            nn.MaxPool2d(kernel_size=2, stride=2)\n        )\n        self.conv_block5 = nn.Sequential(\n            nn.Conv2d(512, 512, kernel_size=3, padding=1),\n            nn.BatchNorm2d(512),\n            nn.ReLU(inplace=True),\n            nn.Conv2d(512, 512, kernel_size=3, padding=1),\n            nn.BatchNorm2d(512),\n            nn.ReLU(inplace=True),\n            nn.Conv2d(512, 512, kernel_size=3, padding=1),\n            nn.BatchNorm2d(512),\n            nn.ReLU(inplace=True),\n            nn.MaxPool2d(kernel_size=2, stride=2)\n        )\n        self.pool = nn.AvgPool2d(7, stride=1)\n     \n        self.cls = nn.Linear(in_features=768, out_features=num_classes, bias=True)\n        \n       # initialize the attention blocks defined above\n        self.attn1 = AttentionBlock(256, 512, 256, 4, normalize_attn=normalize_attn)\n               \n        self.reset_parameters(self.cls)\n        self.reset_parameters(self.attn1)\n    \n    def reset_parameters(self, module):\n        for m in module.modules():\n            if isinstance(m, nn.Conv2d):\n                nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')\n                if m.bias is not None:\n                    nn.init.constant_(m.bias, 0.)\n            elif isinstance(m, nn.BatchNorm2d):\n                nn.init.constant_(m.weight, 1.)\n                nn.init.constant_(m.bias, 0.)\n            elif isinstance(m, nn.Linear):\n                nn.init.normal_(m.weight, 0., 0.01)\n                nn.init.constant_(m.bias, 0.)\n    \n    def forward(self, x):\n        block1 = self.conv_block1(x)       # /2\n        block2 = self.conv_block2(block1)  # /4\n        block3 = self.conv_block3(block2)  # /8\n        block4 = self.conv_block4(block3)  # /16\n        block5 = self.conv_block5(block4)  # /32\n        N, __, __, __ = block5.size()\n        \n        g = self.pool(block5).view(N,512)\n        a1, g1 = self.attn1(block3, block5)\n        g_hat = torch.cat((g,g1), dim=1) # batch_size x C\n        out = self.cls(g_hat)\n\n        return out\n\n\nmodel = Model(2)\nx = torch.randn((8,3,224,224))\nmodel(x)\n\ntensor([[ 0.1368, -0.0015],\n        [ 0.1678, -0.0365],\n        [ 0.1938,  0.0303],\n        [ 0.1695, -0.0208],\n        [ 0.1785,  0.0083],\n        [ 0.1693, -0.0036],\n        [ 0.1895, -0.0057],\n        [ 0.1759,  0.0108]], grad_fn=&lt;AddmmBackward0&gt;)",
+    "crumbs": [
+      "ML for Sustainability"
+    ]
+  },
+  {
+    "objectID": "ml-for-sustainability-srip-2024.html#now-we-just-for-every-data-class-perform-one-vs-rest-classification-for",
+    "href": "ml-for-sustainability-srip-2024.html#now-we-just-for-every-data-class-perform-one-vs-rest-classification-for",
+    "title": "ML for Sustainability",
+    "section": "Now we just for every data class perform One vs Rest classification for :",
+    "text": "Now we just for every data class perform One vs Rest classification for :\n\nResnet\nEfficientNet\nCustomModel",
+    "crumbs": [
+      "ML for Sustainability"
+    ]
+  },
+  {
+    "objectID": "ml-for-sustainability-srip-2024.html#note-i-am-currently-performing-for-only-5-selected-class-due-to-compute-unavailability-and-kaggle-gpu-just-stucks-after-some-hours.",
+    "href": "ml-for-sustainability-srip-2024.html#note-i-am-currently-performing-for-only-5-selected-class-due-to-compute-unavailability-and-kaggle-gpu-just-stucks-after-some-hours.",
+    "title": "ML for Sustainability",
+    "section": "|Note : i am currently performing for only 5 selected class, due to compute unavailability and kaggle GPU just stucks after some hours.",
+    "text": "|Note : i am currently performing for only 5 selected class, due to compute unavailability and kaggle GPU just stucks after some hours.",
+    "crumbs": [
+      "ML for Sustainability"
+    ]
+  },
+  {
+    "objectID": "ml-for-sustainability-srip-2024.html#since-90-classes-are-lot-we-will-plot-foldwise-mean-of-loss-accuracy-and-confusion-matrix-for-all-classes",
+    "href": "ml-for-sustainability-srip-2024.html#since-90-classes-are-lot-we-will-plot-foldwise-mean-of-loss-accuracy-and-confusion-matrix-for-all-classes",
+    "title": "ML for Sustainability",
+    "section": "Since 90 classes are lot, we will plot foldwise mean of loss accuracy and confusion matrix for all classes",
+    "text": "Since 90 classes are lot, we will plot foldwise mean of loss accuracy and confusion matrix for all classes",
+    "crumbs": [
+      "ML for Sustainability"
+    ]
+  },
+  {
+    "objectID": "ml-for-sustainability-srip-2024.html#resnet-plots",
+    "href": "ml-for-sustainability-srip-2024.html#resnet-plots",
+    "title": "ML for Sustainability",
+    "section": "Resnet Plots",
+    "text": "Resnet Plots\n\nimport numpy as np\nimport matplotlib.pyplot as plt\nfrom sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, roc_curve, roc_auc_score\n\ndef plot_loss(allloss):\n    fig, axs = plt.subplots(1, 3, figsize=(15, 5))\n    for i in range(3):\n        axs[i].plot(np.mean(allloss[f\"fold{i+1}\"],axis=0)[0], label=f\"{fold+1} fold\",c='red')\n        axs[i].set_title(f'Fold {i+1} Validation Mean Loss')  \n        axs[i].set_xlabel('Epochs/fold')\n        axs[i].set_ylabel('Loss')\n        axs[i].legend()\n    plt.tight_layout()  \n    plt.show()\n\ndef plot_acc(allacc):\n    fig, axs = plt.subplots(1, 3, figsize=(15, 5))\n    for i in range(3):\n        axs[i].plot(np.mean(allacc[f\"fold{i+1}\"],axis=0)[0], label=f\"{fold+1} fold\",c='orange')\n        axs[i].set_title(f'Fold {i+1} Validation Mean Accuracy')  \n        axs[i].set_xlabel('Epochs/fold')\n        axs[i].set_ylabel('Loss')\n        axs[i].legend()\n    plt.tight_layout()  \n    plt.show()\n\ndef plot_cm(all_y_true, all_y_pred):\n    fig, axs = plt.subplots(1, 3, figsize=(15, 5))\n    for fold in range(3):    \n        real = []\n        for i in range(len(ally_true[f\"fold{fold+1}\"])):\n            real.extend(ally_true[f\"fold{fold+1}\"][i][0])\n        pred = []\n        for i in range(len(ally_pred[f\"fold{fold+1}\"])):\n            pred.extend(ally_pred[f\"fold{fold+1}\"][i][0])\n        cm = confusion_matrix(real, pred)\n        ConfusionMatrixDisplay(cm).plot(ax=axs[fold],cmap='Blues',values_format='d')\n        axs[fold].set_title(f\"Fold {fold+1}\")\n    plt.tight_layout()\n    plt.show()\nplot_loss(allloss)\nplot_acc(allacc)\nplot_cm(ally_true,ally_pred)",
+    "crumbs": [
+      "ML for Sustainability"
+    ]
+  },
+  {
+    "objectID": "ml-for-sustainability-srip-2024.html#custommodel-1",
+    "href": "ml-for-sustainability-srip-2024.html#custommodel-1",
+    "title": "ML for Sustainability",
+    "section": "CustomModel",
+    "text": "CustomModel\n::: {#cell-36 .cell _kg_hide-input=‘false’ execution=‘{“iopub.execute_input”:“2024-02-23T03:46:46.633452Z”,“iopub.status.busy”:“2024-02-23T03:46:46.633157Z”,“iopub.status.idle”:“2024-02-23T03:56:15.240233Z”,“shell.execute_reply”:“2024-02-23T03:56:15.239138Z”,“shell.execute_reply.started”:“2024-02-23T03:46:46.633427Z”}’ scrolled=‘true’ trusted=‘true’ execution_count=13}\n##\nallloss = {\"fold1\":[],\"fold2\":[],\"fold3\":[]}\nallacc = {\"fold1\":[],\"fold2\":[],\"fold3\":[]}\nally_true = {\"fold1\":[],\"fold2\":[],\"fold3\":[]}\nally_pred = {\"fold1\":[],\"fold2\":[],\"fold3\":[]}\n\nmetrics = [allloss,allacc,ally_true,ally_pred]\n\nimport time\ntimec = []\n\nbest_acc_cust = 0.0\nfor data_idx in range(n_classes):\n    s = time.time()\n    loss,acc,y_true,y_pred,best_acc_cust = one_vs_rest(model,\"CustomAttModel_bi\",data_idx,best_acc=best_acc_cust)\n    print(f\"-------------------data_class:{data_idx+1} completed---------------\")\n    print(f\"time elapsed:{time.time()-s:.2f} seconds\")\n    timec.append(time.time()-s)\n    returned = [loss,acc,y_true,y_pred]\n    for i,m in enumerate(metrics):\n        for fold in range(3):\n            m[f\"fold{fold+1}\"].append(returned[i][f\"fold{fold+1}\"])\n\nFold 1:\nModel saved to CustomAttModel_bi_model.pth\nCustomAttModel_bi weights saved with best accuracy :0.967741935483871\nTraining completed weight saved.\nFold 2:\nweights of CustomAttModel_bi loaded\nTraining completed weight saved.\nFold 3:\nweights of CustomAttModel_bi loaded\nTraining completed weight saved.\n-------------------data_class:1 completed---------------\ntime elapsed:112.75 seconds\nFold 1:\nweights of CustomAttModel_bi loaded\nTraining completed weight saved.\nFold 2:\nweights of CustomAttModel_bi loaded\nTraining completed weight saved.\nFold 3:\nweights of CustomAttModel_bi loaded\nTraining completed weight saved.\n-------------------data_class:2 completed---------------\ntime elapsed:112.96 seconds\nFold 1:\nweights of CustomAttModel_bi loaded\nTraining completed weight saved.\nFold 2:\nweights of CustomAttModel_bi loaded\nTraining completed weight saved.\nFold 3:\nweights of CustomAttModel_bi loaded\nModel saved to CustomAttModel_bi_model.pth\nCustomAttModel_bi weights saved with best accuracy :0.9720430107526882\nTraining completed weight saved.\n-------------------data_class:3 completed---------------\ntime elapsed:113.43 seconds\nFold 1:\nweights of CustomAttModel_bi loaded\nTraining completed weight saved.\nFold 2:\nweights of CustomAttModel_bi loaded\nTraining completed weight saved.\nFold 3:\nweights of CustomAttModel_bi loaded\nTraining completed weight saved.\n-------------------data_class:4 completed---------------\ntime elapsed:116.66 seconds\nFold 1:\nweights of CustomAttModel_bi loaded\nTraining completed weight saved.\nFold 2:\nweights of CustomAttModel_bi loaded\nTraining completed weight saved.\nFold 3:\nweights of CustomAttModel_bi loaded\nTraining completed weight saved.\n-------------------data_class:5 completed---------------\ntime elapsed:112.79 seconds\n\n\nEpoch 1/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.36it/s, acc=0.945, loss=0.224]\nEpoch 1/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  4.23it/s, acc=0.968, loss=0.148]\nEpoch 2/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.42it/s, acc=0.949, loss=0.171]\nEpoch 2/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  4.38it/s, acc=0.88, loss=0.394] \nEpoch 3/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.47it/s, acc=0.951, loss=0.173]\nEpoch 3/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  4.11it/s, acc=0.927, loss=0.249]\nEpoch 1/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.52it/s, acc=0.961, loss=0.219]\nEpoch 1/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  4.08it/s, acc=0.942, loss=0.221]\nEpoch 2/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.49it/s, acc=0.96, loss=0.168] \nEpoch 2/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  4.25it/s, acc=0.953, loss=0.187]\nEpoch 3/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.40it/s, acc=0.961, loss=0.131]\nEpoch 3/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  3.97it/s, acc=0.951, loss=0.197]\nEpoch 1/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.54it/s, acc=0.958, loss=0.175]\nEpoch 1/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  4.22it/s, acc=0.953, loss=0.212]\nEpoch 2/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.55it/s, acc=0.959, loss=0.158]\nEpoch 2/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  4.00it/s, acc=0.953, loss=0.189]\nEpoch 3/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.50it/s, acc=0.959, loss=0.147]\nEpoch 3/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  3.95it/s, acc=0.951, loss=0.196]\nEpoch 1/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.43it/s, acc=0.948, loss=0.218]\nEpoch 1/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  4.35it/s, acc=0.948, loss=0.166]\nEpoch 2/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.48it/s, acc=0.948, loss=0.147]\nEpoch 2/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  4.39it/s, acc=0.908, loss=0.324]\nEpoch 3/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.47it/s, acc=0.951, loss=0.127]\nEpoch 3/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  3.85it/s, acc=0.966, loss=0.12] \nEpoch 1/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.62it/s, acc=0.962, loss=0.156]\nEpoch 1/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  3.76it/s, acc=0.933, loss=0.173]\nEpoch 2/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.51it/s, acc=0.959, loss=0.136]\nEpoch 2/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:04&lt;00:00,  3.67it/s, acc=0.933, loss=0.178]\nEpoch 3/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.53it/s, acc=0.961, loss=0.123]\nEpoch 3/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  3.93it/s, acc=0.935, loss=0.216]\nEpoch 1/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.51it/s, acc=0.951, loss=0.159]\nEpoch 1/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  3.94it/s, acc=0.578, loss=1.13]\nEpoch 2/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.52it/s, acc=0.951, loss=0.131]\nEpoch 2/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  4.12it/s, acc=0.961, loss=0.144]\nEpoch 3/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.52it/s, acc=0.963, loss=0.117]\nEpoch 3/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  3.98it/s, acc=0.959, loss=0.125]\nEpoch 1/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.42it/s, acc=0.958, loss=0.168]\nEpoch 1/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  4.12it/s, acc=0.953, loss=0.228]\nEpoch 2/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.46it/s, acc=0.959, loss=0.164]\nEpoch 2/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  4.27it/s, acc=0.953, loss=0.209]\nEpoch 3/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.36it/s, acc=0.956, loss=0.141]\nEpoch 3/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  4.17it/s, acc=0.953, loss=0.149]\nEpoch 1/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.59it/s, acc=0.962, loss=0.153]\nEpoch 1/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  4.15it/s, acc=0.946, loss=0.241]\nEpoch 2/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.52it/s, acc=0.962, loss=0.142]\nEpoch 2/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  3.83it/s, acc=0.946, loss=0.183]\nEpoch 3/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.51it/s, acc=0.962, loss=0.127]\nEpoch 3/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  3.86it/s, acc=0.933, loss=0.183]\nEpoch 1/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.55it/s, acc=0.949, loss=0.187]\nEpoch 1/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  4.18it/s, acc=0.972, loss=0.132]\nEpoch 2/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.35it/s, acc=0.949, loss=0.173]\nEpoch 2/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  4.13it/s, acc=0.972, loss=0.106] \nEpoch 3/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.41it/s, acc=0.949, loss=0.154]\nEpoch 3/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  4.02it/s, acc=0.972, loss=0.126]\nEpoch 1/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.44it/s, acc=0.957, loss=0.158]\nEpoch 1/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  3.81it/s, acc=0.957, loss=0.147]\nEpoch 2/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:09&lt;00:00,  3.27it/s, acc=0.957, loss=0.142]\nEpoch 2/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  4.37it/s, acc=0.957, loss=0.15] \nEpoch 3/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.40it/s, acc=0.957, loss=0.204]\nEpoch 3/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  4.11it/s, acc=0.957, loss=0.153]\nEpoch 1/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.37it/s, acc=0.963, loss=0.148]\nEpoch 1/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:04&lt;00:00,  3.57it/s, acc=0.944, loss=0.174]\nEpoch 2/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.38it/s, acc=0.963, loss=0.132]\nEpoch 2/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  3.92it/s, acc=0.944, loss=0.222]\nEpoch 3/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.35it/s, acc=0.963, loss=0.132]\nEpoch 3/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:04&lt;00:00,  3.61it/s, acc=0.944, loss=0.174]\nEpoch 1/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.51it/s, acc=0.949, loss=0.188]\nEpoch 1/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:04&lt;00:00,  3.66it/s, acc=0.97, loss=0.143] \nEpoch 2/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.35it/s, acc=0.951, loss=0.163]\nEpoch 2/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  4.20it/s, acc=0.948, loss=0.149]\nEpoch 3/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.41it/s, acc=0.952, loss=0.169]\nEpoch 3/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  4.05it/s, acc=0.97, loss=0.116] \nEpoch 1/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.34it/s, acc=0.955, loss=0.172]\nEpoch 1/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  4.31it/s, acc=0.942, loss=0.159]\nEpoch 2/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.49it/s, acc=0.955, loss=0.19] \nEpoch 2/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  4.16it/s, acc=0.946, loss=0.162]\nEpoch 3/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.52it/s, acc=0.947, loss=0.185]\nEpoch 3/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  4.38it/s, acc=0.963, loss=0.11] \nEpoch 1/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.46it/s, acc=0.967, loss=0.14] \nEpoch 1/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  3.99it/s, acc=0.869, loss=0.465]\nEpoch 2/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.53it/s, acc=0.963, loss=0.125] \nEpoch 2/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  4.07it/s, acc=0.942, loss=0.247]\nEpoch 3/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.51it/s, acc=0.965, loss=0.106] \nEpoch 3/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  4.10it/s, acc=0.953, loss=0.143]\nEpoch 1/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.56it/s, acc=0.951, loss=0.185]\nEpoch 1/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:04&lt;00:00,  3.52it/s, acc=0.946, loss=0.198]\nEpoch 2/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.54it/s, acc=0.944, loss=0.168]\nEpoch 2/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:04&lt;00:00,  3.68it/s, acc=0.957, loss=0.136]\nEpoch 3/3 (Training) for CustomAttModel_bi: 100%|██████████| 30/30 [00:08&lt;00:00,  3.55it/s, acc=0.956, loss=0.12] \nEpoch 3/3 (Validation) for CustomAttModel_bi: 100%|██████████| 15/15 [00:03&lt;00:00,  4.24it/s, acc=0.97, loss=0.0866] \n\n:::",
+    "crumbs": [
+      "ML for Sustainability"
+    ]
+  },
+  {
+    "objectID": "ml-for-sustainability-srip-2024.html#comparing-best-accuracy-on-validation",
+    "href": "ml-for-sustainability-srip-2024.html#comparing-best-accuracy-on-validation",
+    "title": "ML for Sustainability",
+    "section": "Comparing Best Accuracy on Validation",
+    "text": "Comparing Best Accuracy on Validation\n\nmodels = [\"resnet\", \"efficientnet\", \"custom\"]\naccuracies = [best_acc_resnet, best_acc_eff, best_acc_cust]\n\n# Define a colormap\ncolors = [\"orange\",\"blue\",\"red\"]\n\nplt.figure(figsize=(6, 6))\nbars = plt.bar(models, accuracies, color=colors)\n\nplt.xlabel('Models')\nplt.ylabel('Accuracy')\nplt.title('Accuracy Comparison of Different Models')\n\n# Adding the accuracy values on top of the bars\nfor bar, accuracy in zip(bars, accuracies):\n    plt.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.005, f'{accuracy:.2f}', ha='center', va='bottom')\n\nplt.tight_layout()\nplt.show()",
+    "crumbs": [
+      "ML for Sustainability"
+    ]
+  },
+  {
+    "objectID": "ml-for-sustainability-srip-2024.html#visualising-customnet-attention-map",
+    "href": "ml-for-sustainability-srip-2024.html#visualising-customnet-attention-map",
+    "title": "ML for Sustainability",
+    "section": "Visualising CustomNet Attention Map",
+    "text": "Visualising CustomNet Attention Map\n\nclass Attn(Model):\n    def __init__(self):\n        super().__init__(num_classes=2)\n        \n    def forward(self, x):\n        block1 = self.conv_block1(x)       # /2\n        block2 = self.conv_block2(block1)  # /4\n        block3 = self.conv_block3(block2)  # /8\n        block4 = self.conv_block4(block3)  # /16\n        block5 = self.conv_block5(block4)  # /32\n        N, __, __, __ = block5.size()\n        \n        g = self.pool(block5).view(N, 512)\n        a1, g1 = self.attn1(block3, block5)\n        g_hat = torch.cat((g, g1), dim=1)  # batch_size x C\n        out = self.cls(g_hat)\n        return a1\n\nmodel = Attn().to(device)\nmodel.load_state_dict(torch.load(f\"CustomAttModel_bi_model.pth\"))\n\n&lt;All keys matched successfully&gt;\n\n\n\nrandom_indices = np.random.randint(0, 90, size=16)\n\nfig, axes = plt.subplots(4, 4, figsize=(16, 8))\n\n# Plot each attention map\nfor i, ax in enumerate(axes.flatten()):\n    with torch.no_grad():\n        model.eval()\n        img_tensor = temp_data[random_indices[i]][0].unsqueeze(0).to(device)\n        attention_map = model(img_tensor).cpu().numpy()\n    ax.imshow(attention_map[0][0])\n\n\nplt.tight_layout()\nplt.show()",
+    "crumbs": [
+      "ML for Sustainability"
+    ]
+  },
+  {
+    "objectID": "ml-for-sustainability-srip-2024.html#visualing-convolution-output-of-layers",
+    "href": "ml-for-sustainability-srip-2024.html#visualing-convolution-output-of-layers",
+    "title": "ML for Sustainability",
+    "section": "Visualing Convolution Output of Layers",
+    "text": "Visualing Convolution Output of Layers\n\ndef layer_viz(model, input_image_path):\n    # Load the image and preprocess it\n    transform = transforms.Compose([\n        transforms.Resize(256),\n        transforms.CenterCrop(224),\n        transforms.ToTensor(),\n        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),\n    ])\n    input_image = Image.open(input_image_path)\n    input_tensor = transform(input_image).unsqueeze(0).to(device)  # Add batch dimension\n\n    # Set model to evaluation mode\n    model.eval()\n\n    # Forward pass to get the output of convolutional layers\n    activations = []\n    def hook(module, input, output):\n        activations.append(output.cpu().numpy())\n    hooks = []\n    for layer in model.modules():\n        if isinstance(layer, torch.nn.Conv2d):\n            hooks.append(layer.register_forward_hook(hook))\n\n    # Pass input image through the model\n    with torch.no_grad():\n        model(input_tensor)\n        \n    activations = activations[::-1]\n\n\n    # Remove hooks\n    for hook in hooks:\n        hook.remove()\n\n    # Plot the activations of each convolutional layer in subplots\n    num_layers = len(activations)\n    num_cols = min(num_layers, 4)  # Limit the number of columns in subplots\n    num_rows = (num_layers - 1) // num_cols + 1\n    fig, axes = plt.subplots(num_rows, num_cols, figsize=(15, 5 * num_rows))\n    for i, activation in enumerate(activations):\n        row_idx = i // num_cols\n        col_idx = i % num_cols\n        axes[row_idx, col_idx].imshow(activation[0][0].squeeze(), cmap='viridis')\n        axes[row_idx, col_idx].set_title(f'Layer {i+1}')\n        axes[row_idx, col_idx].axis('off')\n    plt.tight_layout()\n    plt.show()",
+    "crumbs": [
+      "ML for Sustainability"
+    ]
+  },
+  {
+    "objectID": "ml-for-sustainability-srip-2024.html#custommodel-3",
+    "href": "ml-for-sustainability-srip-2024.html#custommodel-3",
+    "title": "ML for Sustainability",
+    "section": "CustomModel",
+    "text": "CustomModel\n\nmodel = Model(2).to(device)\nmodel.load_state_dict(torch.load(f\"CustomAttModel_bi_model.pth\"))\nlayer_viz(resnet, input_image_path=\"/kaggle/input/animal-image-dataset-90-different-animals/animals/animals/antelope/02f4b3be2d.jpg\")",
+    "crumbs": [
+      "ML for Sustainability"
+    ]
+  },
+  {
+    "objectID": "ml-for-sustainability-srip-2024.html#double-descent-for-custommodel-performance",
+    "href": "ml-for-sustainability-srip-2024.html#double-descent-for-custommodel-performance",
+    "title": "ML for Sustainability",
+    "section": "Double Descent for custommodel performance",
+    "text": "Double Descent for custommodel performance\n\nin othermodels loss and accuracy is as expected.\nbut in CustomAttentionModel accuracy is first increasing then decreasing due to generalisation error but if we see on fold 3 it is again increasing. it can be explained with Double Descent it is counter intuitive pattern observed, when in over parametrised models generalisation error increases after overfitting.\n\nref:[https://mlu-explain.github.io/double-descent/]",
+    "crumbs": [
+      "ML for Sustainability"
+    ]
+  },
+  {
+    "objectID": "ml-for-sustainability-srip-2024.html#layer-outputs",
+    "href": "ml-for-sustainability-srip-2024.html#layer-outputs",
+    "title": "ML for Sustainability",
+    "section": "layer outputs",
+    "text": "layer outputs\n\nConvolution is our prior knowledge inserted into neural nets that pixels are dependent around its neighbours.but we dont define how it is related and it is learned.\neach layer is like a building block of images of evolving hierachy, where first learn lines and edges then laters comple features like face and eye.",
+    "crumbs": [
+      "ML for Sustainability"
+    ]
+  },
+  {
+    "objectID": "index.html#train-function",
+    "href": "index.html#train-function",
+    "title": "Readme",
+    "section": "Train Function",
+    "text": "Train Function\n\nFor every epoch, it first trains on train_loader and does validation on val_loader.\nUsing tqdm for a progress bar.\nDefault hyperparameters:\n\nEpochs per fold: 3\nLearning rate: 1e-4\nLoss function: CrossEntropyLoss\nOptimizer: AdamW with lr = 1e-4 and defaults betas (0.9,0.99) with 0.01 default weight decay.\n\n\nSuperconvergence post\n\nOptimizations like:\n\nDeleting model at the end and saving best weights.\nDeleting images and labels sent to GPU at the end.\nHalf precision for validation, since we don’t have to update weights here, using half precision makes it fast for fast evaluating.",
+    "crumbs": [
+      "Readme"
+    ]
+  },
+  {
+    "objectID": "index.html#main-one-vs-rest-binary-classification-function",
+    "href": "index.html#main-one-vs-rest-binary-classification-function",
+    "title": "Readme",
+    "section": "Main One vs Rest Binary Classification Function",
+    "text": "Main One vs Rest Binary Classification Function\n\nHere we will select some class and then perform binary classification on it, meaning we assign 1 label to the selected class and 0 label to other classes and then take loss by CrossEntropy and perform weight update.\nFor every data class, we will make a train and Validation Dataloader for 3 folds and collect data like loss and accuracy to plot.",
+    "crumbs": [
+      "Readme"
+    ]
+  },
+  {
+    "objectID": "index.html#dataloader",
+    "href": "index.html#dataloader",
+    "title": "Readme",
+    "section": "Dataloader",
+    "text": "Dataloader\n\nTaking images from a particular data index class and other data classes, and for binary classification, we set data index class labels as 1 and other labels as 0.\nHere take is a parameter which defines how much to take from other classes. Currently, we take 10% of other classes and it works.\nSetting number of workers 2 and pin memory for faster data caching.\nSubsetRandomSampler for selecting indices.",
+    "crumbs": [
+      "Readme"
+    ]
+  },
+  {
+    "objectID": "index.html#batch-size",
+    "href": "index.html#batch-size",
+    "title": "Readme",
+    "section": "Batch Size",
+    "text": "Batch Size\n\nBatch size is 32, since GPU we are using P100 has enough memory and bottleneck is not GPU but CPU for data caching.",
+    "crumbs": [
+      "Readme"
+    ]
+  },
+  {
+    "objectID": "index.html#custommodel",
+    "href": "index.html#custommodel",
+    "title": "Readme",
+    "section": "CustomModel",
+    "text": "CustomModel\n\nWe used model with AttentionBlock to emphasize the importance of image patches, to focus on important part of images and discard irrelevant parts. Although it is helpful in medical datasets but in animal datasets maybe there is a big landscape with animal in small pixels for e.g., with birds, there attention will be useful.\n\n\nComponents\nConvolution Blocks\n\nThere are 5 Conv Blocks each constituting:\n\nconv2d, batchnorm, relu, conv2d, batchnorm, relu and maxpool at the end.\n\nThese convblocks are commonly used.\nBatchNorm is used to stabilize training from covariate shift (source).\nReLU is used as an activation function as used by ImageNet paper.\n\nHyperparameters\n\nKernel size: 3 for Conv filters and 2 for MaxPooling.\n\nAttention Block\n\nThe intermediate features is the output of pool-3 or pool-4 and the global feature vector (output of pool-5) is fed as input to the attention layer.\nFeature upsampling is done via bilinear interpolation to make intermediate and global feature vector same shape.\nAfter that an element-wise sum is done followed by a convolution operation that just reduces the 256 channels to 1.\nThis is then fed into a Softmax layer, which gives us a normalized Attention map (A). Each scalar element in A represents the degree of attention to the corresponding spatial feature vector in F.\nThe new feature vector 𝐹̂ is then computed by pixel-wise multiplication. That is, each feature vector f is multiplied by the attention element a\nSo, the attention map A and the new feature vector 𝐹̂ are the outputs of the Attention Layer.\n\nReference",
+    "crumbs": [
+      "Readme"
+    ]
+  },
+  {
+    "objectID": "index.html#initializing",
+    "href": "index.html#initializing",
+    "title": "Readme",
+    "section": "Initializing",
+    "text": "Initializing\n\nWe initialize with Kaiming normal to prevent gradient vanishing or exploding latter on.\n\nConv2d Layers: initializes the weights using the Kaiming normal.\nBatchNorm2d Layers: it sets the weights to 1 and biases to 0.\nLinear Layers: initializes the weights from a normal distribution with mean 0 and standard deviation 0.01. It sets the biases to 0.",
+    "crumbs": [
+      "Readme"
+    ]
+  },
+  {
+    "objectID": "index.html#at-the-end-we-achieved-high-accuracy-for-resnet-efficientnet-and-custom-convolution-attention-model",
+    "href": "index.html#at-the-end-we-achieved-high-accuracy-for-resnet-efficientnet-and-custom-convolution-attention-model",
+    "title": "Readme",
+    "section": "At the end we achieved high accuracy for Resnet EfficientNet and Custom Convolution Attention Model",
+    "text": "At the end we achieved high accuracy for Resnet EfficientNet and Custom Convolution Attention Model",
+    "crumbs": [
+      "Readme"
+    ]
+  }
+]
